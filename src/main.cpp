@@ -1,17 +1,9 @@
 // Enable debug prints to serial monitor
-#define MY_DEBUG 
-
+#define MY_DEBUG
 #define DEBUG
 
-// Define a static node address, remove if you want auto address assignment
-//#define MY_NODE_ID 3
-
-#define MY_BAUD_RATE 115200
-
-// Enable and select radio type attached
 #define MY_RADIO_RF24
-
-// Enable to support OTA for this node (needs DualOptiBoot boot-loader to fully work)
+#define MY_BAUD_RATE 115200
 #define MY_OTA_FIRMWARE_FEATURE
 
 #include <SPI.h>
@@ -22,37 +14,32 @@
 #include "drivers/SPIFlash/SPIFlash.cpp"
 #endif
 #include <sha204_library.h>
-
 #include <RunningAverage.h>
-// #include <avr/power.h>
 
-// Uncomment the line below, to transmit battery voltage as a normal sensor value
-#define BATT_SENSOR    199
-
-#define RELEASE "2.3"
-
-#define AVERAGES 2
+#define SKETCH_NAME "Sensebender Micro"
+#define SKETCH_MAJOR_VER "0"
+#define SKETCH_MINOR_VER "2"
 
 // Child sensor ID's
 #define CHILD_ID_TEMP  1
 #define CHILD_ID_HUM   2
+// Uncomment the line below, to transmit battery voltage as a normal sensor value
+#define CHILD_ID_BATT  199
 
-// How many milli seconds between each measurement
-#define MEASURE_INTERVAL 60000
+#define AVERAGES 2
 
-// How many milli seconds should we wait for OTA?
+// How many milliseconds between each measurement
+#define MEASURE_INTERVAL 60000 // 60s
+// How many milliseconds should we wait for OTA?
 #define OTA_WAIT_PERIOD 300
-
 // FORCE_TRANSMIT_INTERVAL, this number of times of wakeup, the sensor is forced to report all values to the controller
 #define FORCE_TRANSMIT_INTERVAL 30 
-
 // When MEASURE_INTERVAL is 60000 and FORCE_TRANSMIT_INTERVAL is 30, we force a transmission every 30 minutes.
 // Between the forced transmissions a tranmission will only occur if the measured value differs from the previous measurement
 
-// HUMI_TRANSMIT_THRESHOLD tells how much the humidity should have changed since last time it was transmitted. Likewise with
-// TEMP_TRANSMIT_THRESHOLD for temperature threshold.
-#define HUMI_TRANSMIT_THRESHOLD 0.5
-#define TEMP_TRANSMIT_THRESHOLD 0.5
+// THRESHOLD defines how much the value should have changed since last time it was transmitted.
+#define HUMI_TRANSMIT_THRESHOLD 0.3
+#define TEMP_TRANSMIT_THRESHOLD 0.3
 
 // Pin definitions
 #define TEST_PIN       A0
@@ -66,17 +53,15 @@ SI7021 humiditySensor;
 SPIFlash flash(8, 0x1F65);
 
 // Sensor messages
-MyMessage msgHum(CHILD_ID_HUM, V_HUM);
 MyMessage msgTemp(CHILD_ID_TEMP, V_TEMP);
-
-#ifdef BATT_SENSOR
-MyMessage msgBatt(BATT_SENSOR, V_VOLTAGE);
+MyMessage msgHum(CHILD_ID_HUM, V_HUM);
+#ifdef CHILD_ID_BATT
+MyMessage msgBatt(CHILD_ID_BATT, V_VOLTAGE);
 #endif
 
 // Global settings
 int measureCount = 0;
 int sendBattery = 0;
-boolean isMetric = true;
 boolean highfreq = true;
 boolean transmission_occured = false;
 
@@ -88,7 +73,7 @@ long lastBattery = -100;
 RunningAverage raHum(AVERAGES);
 
 // TODO: Move this to header file?
-void sendTempHumidityMeasurements(bool force);
+void sendMeasurements(bool force);
 void testMode();
 void sendBattLevel(bool force);
 long readVcc();
@@ -104,8 +89,7 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  Serial.print("Sensebender Micro FW ");
-  Serial.print(RELEASE);
+  Serial.print(SKETCH_NAME SKETCH_MAJOR_VER "." SKETCH_MINOR_VER);
   Serial.flush();
 
   // First check if we should boot into test mode
@@ -126,7 +110,8 @@ void setup() {
   Serial.println(" - Online!");
   
   raHum.clear();
-  sendTempHumidityMeasurements(false);
+  // Send initial values
+  sendMeasurements(false);
   sendBattLevel(false);
   
 #ifdef MY_OTA_FIRMWARE_FEATURE  
@@ -141,15 +126,13 @@ void presentation()  {
 #ifdef DEBUG
   Serial.println("presentation");
 #endif
-  sendSketchInfo("Sensebender Micro", RELEASE);
-  present(CHILD_ID_TEMP,S_TEMP);
-  present(CHILD_ID_HUM,S_HUM);
-    
-#ifdef BATT_SENSOR
-  present(BATT_SENSOR, S_POWER);
+  sendSketchInfo(SKETCH_NAME, SKETCH_MAJOR_VER "." SKETCH_MINOR_VER);
+  present(CHILD_ID_TEMP, S_TEMP);
+  present(CHILD_ID_HUM, S_HUM);
+#ifdef CHILD_ID_BATT
+  present(CHILD_ID_BATT, S_POWER);
 #endif
 }
-
 
 /*******************************
  * Loop
@@ -158,7 +141,6 @@ void loop() {
 #ifdef DEBUG
   Serial.println("loop");
 #endif
-
   measureCount ++;
   sendBattery ++;
   bool forceTransmit = false;
@@ -168,13 +150,8 @@ void loop() {
     forceTransmit = true; 
     measureCount = 0;
   }
-    
-  sendTempHumidityMeasurements(forceTransmit);
-/*  if (sendBattery > 60) 
-  {
-     sendBattLevel(forceTransmit); // Not needed to send battery info that often
-     sendBattery = 0;
-  }*/
+  sendMeasurements(forceTransmit);
+  
 #ifdef MY_OTA_FIRMWARE_FEATURE
   if (transmission_occured) {
       wait(OTA_WAIT_PERIOD);
@@ -190,9 +167,9 @@ void loop() {
  * Parameters
  * - force : Forces transmission of a value (even if it's the same as previous measurement)
  *******************************/
-void sendTempHumidityMeasurements(bool force) {
+void sendMeasurements(bool force) {
 #ifdef DEBUG
-  Serial.println("sendTempHumidityMeasurements");
+  Serial.println("Sending Measurements");
 #endif
 
   bool tx = force;
@@ -228,8 +205,8 @@ void sendTempHumidityMeasurements(bool force) {
     lastHumidity = humidity;
     transmission_occured = true;
     if (sendBattery > 60) {
-     sendBattLevel(true); // Not needed to send battery info that often
-     sendBattery = 0;
+      sendBattLevel(true); // Not needed to send battery info that often
+      sendBattery = 0;
     }
   }
 }
@@ -248,15 +225,12 @@ void sendBattLevel(bool force) {
   if (vcc != lastBattery) {
     lastBattery = vcc;
 
-#ifdef BATT_SENSOR
+#ifdef CHILD_ID_BATT
     float send_voltage = float(vcc)/1000.0f;
     send(msgBatt.set(send_voltage, 3));
 #endif
-
     // Calculate percentage
-
     vcc = vcc - 1900; // subtract 1.9V from vcc, as this is the lowest voltage we will operate at
-    
     long percent = vcc / 14.0;
     sendBatteryLevel(percent);
     transmission_occured = true;
@@ -287,10 +261,9 @@ long readVcc() {
   uint8_t high = ADCH; // unlocks both
  
   long result = (high<<8) | low;
- 
   result = 1125300L / result; // Calculate Vcc (in mV); 1125300 = 1.1*1023*1000
+
   return result; // Vcc in millivolts
- 
 }
 
 /*******************************
